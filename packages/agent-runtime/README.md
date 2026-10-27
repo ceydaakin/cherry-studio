@@ -24,5 +24,6 @@ bounded pending frames, explicit overflow gaps, and observer error isolation. It
 queue or execution lifecycle. Adapters maintain source identity before publishing events.
 
 Pi-specific APIs previously in this package live in `@cherrystudio/agent-runtime-pi`. Pi Durable
-has a separate adapter in `@cherrystudio/agent-runtime-pi-durable`. Neither adapter is wired into
-the desktop app yet. See the [runtime contract](../../.agents/notes/proposed/architecture/2026-10-17-agent-runtime-contract.md).
+has a separate adapter in `@cherrystudio/agent-runtime-pi-durable`; both are wired into the desktop.
+[`@cherrystudio/agent-runtime-claude-code`](../agent-runtime-claude-code/README.md) provides Claude's
+package adapter; its desktop migration is separate. See the [runtime contract](../../.agents/notes/proposed/architecture/2026-10-17-agent-runtime-contract.md).

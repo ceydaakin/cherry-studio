@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 
-import { isToolUIPart } from 'ai'
+import { isDataUIPart, isToolUIPart } from 'ai'
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, or, type SQL, sql } from 'drizzle-orm'
 import { v4 as uuidv4, v7 as uuidv7, validate as isUuid } from 'uuid'
 
@@ -66,7 +66,7 @@ import {
 } from '@shared/data/types/message'
 import { readCherryMeta } from '@shared/data/types/uiParts'
 
-import { agentSessionContextService } from './AgentSessionContextService'
+import { agentSessionContextService, type RootProjectionCheckpoint } from './AgentSessionContextService'
 import { AgentSessionEditError } from './AgentSessionEditError'
 import { RuntimeForkAnchorSchema } from './agentSessionForkContract'
 import {
@@ -218,10 +218,10 @@ export class AgentSessionDeliveryRoutingError extends Error {
   }
 }
 
-type SaveAgentSessionMessageOptions = { inputResponses?: readonly InputState[] } & (
-  | { db: DbOrTx; publishDataChange?: never }
-  | { db?: undefined; publishDataChange?: boolean }
-)
+type SaveAgentSessionMessageOptions = {
+  inputResponses?: readonly InputState[]
+  projection?: RootProjectionCheckpoint
+} & ({ db: DbOrTx; publishDataChange?: never } | { db?: undefined; publishDataChange?: boolean })
 
 type SavedAgentSessionMessage = {
   entity: AgentSessionMessageEntity
@@ -567,8 +567,14 @@ export class AgentSessionMessageService {
     )
   }
 
-  setEditRuntimeTx(tx: DbOrTx, sessionId: string, userMessageId: string, nativeSessionId: string): void {
-    agentSessionContextService.bindBranchTx(tx, sessionId, userMessageId, nativeSessionId)
+  setEditRuntimeTx(
+    tx: DbOrTx,
+    sessionId: string,
+    userMessageId: string,
+    nativeSessionId: string,
+    runtime = 'pi'
+  ): void {
+    if (runtime === 'pi') agentSessionContextService.bindBranchTx(tx, sessionId, userMessageId, nativeSessionId)
     tx.update(sessionMessagesTable)
       .set({ data: sql`json_set(${sessionMessagesTable.data}, '$.nativeSessionId', ${nativeSessionId})` })
       .where(and(eq(sessionMessagesTable.sessionId, sessionId), eq(sessionMessagesTable.id, userMessageId)))
@@ -1508,6 +1514,7 @@ export class AgentSessionMessageService {
     const timestampMs = Date.now()
     const persist = (tx: DbOrTx) => {
       const saved = this.saveMessageTx(tx, params, timestampMs)
+      if (options.projection) agentSessionContextService.saveRootProjectionTx(tx, params.sessionId, options.projection)
       for (const input of options.inputResponses ?? []) {
         if (!input.inputId) throw new Error('Response association requires an input identity')
         this.mergeSubmissionTx(tx, params.sessionId, input.inputId, input, saved.entity.id)
@@ -1563,13 +1570,22 @@ export class AgentSessionMessageService {
   }
 
   /** Reconciles a child archive's proven source order without editing a product conversation branch. */
-  orderChildArchiveTx(tx: DbOrTx, sessionId: string, order: readonly string[]): void {
+  orderChildArchiveTx(tx: DbOrTx, sessionId: string, order: readonly string[], removed: readonly string[] = []): void {
     const session = tx.select().from(sessionTable).where(eq(sessionTable.id, sessionId)).get()
     if (!session?.ownerSessionId) throw new Error('Only owned child archives can reconcile message order')
     const rows = tx.select().from(sessionMessagesTable).where(eq(sessionMessagesTable.sessionId, sessionId)).all()
     const byId = new Map(rows.filter((row) => row.role !== 'root').map((row) => [row.id, row]))
-    if (new Set(order).size !== byId.size || order.some((id) => !byId.has(id)))
-      throw new Error('Child archive order must retain every message')
+    const priorPath = new Set(
+      readAgentSessionAncestry(tx, sessionId, session.activeNodeId ?? ensureAgentSessionRootTx(tx, sessionId)).map(
+        (row) => row.id
+      )
+    )
+    if (
+      new Set(order).size !== order.length ||
+      order.some((id) => !byId.has(id)) ||
+      [...priorPath].some((id) => byId.has(id) && !order.includes(id) && !removed.includes(id))
+    )
+      throw new Error('Child archive order must retain messages without explicit removal')
     let parentId = ensureAgentSessionRootTx(tx, sessionId)
     for (const id of order) {
       if (byId.get(id)!.parentId !== parentId)
@@ -2407,14 +2423,27 @@ export class AgentSessionMessageService {
   replaceMessageParts(
     sessionId: string,
     messageId: string,
-    parts: AgentSessionMessageEntity['data']['parts']
+    parts: AgentSessionMessageEntity['data']['parts'],
+    projection?: RootProjectionCheckpoint
   ): AgentSessionMessageEntity {
     const saved = application.get('DbService').withWriteTx((tx) => {
       const existingRow = this.findExistingMessageRow(tx, sessionId, messageId)
       if (!existingRow) throw DataApiErrorFactory.notFound('Message', messageId)
 
       const updatedAt = Date.now()
-      const data = { ...existingRow.data, parts }
+      const data = {
+        ...existingRow.data,
+        parts: projection
+          ? [
+              ...(parts ?? []),
+              ...(existingRow.data.parts ?? []).filter(
+                (part) =>
+                  isDataUIPart(part) &&
+                  !parts?.some((native) => isDataUIPart(native) && native.type === part.type && native.id === part.id)
+              )
+            ]
+          : parts
+      }
       const [updated] = tx
         .update(sessionMessagesTable)
         .set({ data, updatedAt })
@@ -2422,6 +2451,7 @@ export class AgentSessionMessageService {
         .returning()
         .all()
       replaceAgentSessionMessageFileRefsTx(tx, messageId, data)
+      if (projection) agentSessionContextService.saveRootProjectionTx(tx, sessionId, projection)
       agentSessionService.touchUpdatedAtTx(tx, sessionId, updatedAt)
       return this.rowToEntity(updated)
     })

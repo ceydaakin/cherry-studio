@@ -14,12 +14,13 @@ import type { AgentChildUpdate, AgentChildView } from '@shared/ai/agentChildProj
 import type { ChildProjectionState } from '@shared/ai/messageProjection'
 import type { CherryUIMessage } from '@shared/data/types/message'
 
-import { ThreadMessageProjection } from './ThreadMessageProjection'
+import { ThreadMessageProjection, type MessageDecorator } from './ThreadMessageProjection'
 
 const logger = loggerService.withContext('ChildThreadProjection')
 type CommittedHistory = {
   items: readonly ContentItem[]
   aliases: Readonly<Record<string, string>>
+  removed?: readonly string[]
 }
 
 export function savedChildView(context: AgentSessionContextRow): AgentChildView {
@@ -30,6 +31,7 @@ export function savedChildView(context: AgentSessionContextRow): AgentChildView 
     revision: 0,
     active: false,
     available: false,
+    canSubmit: false,
     diagnostic: typeof context.checkpointMapping?.gap === 'string' ? context.checkpointMapping.gap : undefined,
     messages: readAgentSessionPath(application.get('DbService').getDb(), context.sessionId).map((row) => ({
       id: row.id,
@@ -50,6 +52,7 @@ export class ChildThreadProjection {
   private readonly committedLiveIds = new Set<string>()
   private readonly nativeIds: Record<string, string>
   private readonly saved = new Map<string, CherryUIMessage>()
+  private readonly removed: Set<string>
   private readonly delivery: MessageProjection<ChildProjectionState>
   private timer?: ReturnType<typeof setTimeout>
   private pending: Promise<void> = Promise.resolve()
@@ -61,9 +64,11 @@ export class ChildThreadProjection {
   constructor(
     readonly context: AgentSessionContextRow,
     private readonly handle: ThreadHandle,
-    private readonly readCommitted: () => CommittedHistory | Promise<CommittedHistory>
+    private readonly readCommitted: () => CommittedHistory | Promise<CommittedHistory>,
+    private readonly decorate?: MessageDecorator
   ) {
-    this.projection = new ThreadMessageProjection(handle.thread)
+    this.projection = new ThreadMessageProjection(handle.thread, decorate)
+    this.removed = new Set(context.checkpointMapping?.removed as string[] | undefined)
     this.nativeIds = { ...(context.checkpointMapping?.projection as Record<string, string> | undefined) }
     this.view = savedChildView(context)
     this.delivery = new MessageProjection<ChildProjectionState>(this.view)
@@ -95,6 +100,14 @@ export class ChildThreadProjection {
     this.source = source
     const result = await this.handle.observe(async (event) => {
       if (this.stopped || this.source !== source) return
+      if (event.type === 'item.remove') this.removed.add(event.ref.id)
+      if (event.type === 'item.upsert') {
+        for (const ref of event.replaces ?? []) {
+          const id = this.nativeIds[ref.id] ?? this.productIds.get(ref.id)
+          if (id) this.productIds.set(event.item.ref.id, id)
+          this.removed.add(ref.id)
+        }
+      }
       try {
         await this.projection.accept(event)
       } catch (error) {
@@ -105,6 +118,7 @@ export class ChildThreadProjection {
       if (
         event.type === 'snapshot' ||
         event.type === 'gap' ||
+        event.type === 'item.remove' ||
         event.type === 'input.changed' ||
         (event.type === 'item.upsert' &&
           (event.item.type === 'tool-result' || event.item.completeness === 'complete')) ||
@@ -136,7 +150,7 @@ export class ChildThreadProjection {
       this.timer = undefined
       void this.flush().catch((error) => {
         logger.error('Child archive flush failed', { contextId: this.context.id, error })
-        this.publish({ ...this.view, diagnostic: String(error), available: false })
+        this.publish({ ...this.view, diagnostic: String(error), available: false, canSubmit: false })
       })
     }, 80)
     this.timer.unref()
@@ -165,6 +179,7 @@ export class ChildThreadProjection {
     const history = this.needsHistory
     this.needsHistory = false
     const archive = history ? await this.readCommitted() : undefined
+    for (const id of archive?.removed ?? []) this.removed.add(id)
     for (const item of archive?.items ?? [])
       if (item.type === 'message' && item.inputId && messages.hasSubmission(this.context.sessionId, item.inputId))
         this.nativeIds[item.ref.id] = item.inputId
@@ -177,12 +192,12 @@ export class ChildThreadProjection {
     let next = new Map(this.saved)
     const committed = new Set<string>()
     if (archive) {
-      const recovered = new ThreadMessageProjection(this.handle.thread)
+      const recovered = new ThreadMessageProjection(this.handle.thread, this.decorate)
       try {
         await recovered.accept({
           type: 'snapshot',
           coverage: 'current-view',
-          items: archive.items,
+          items: archive.items.filter((item) => !this.removed.has(item.ref.id)),
           inputs: [],
           activity: current.activity
         })
@@ -190,13 +205,23 @@ export class ChildThreadProjection {
           const id = (this.nativeIds[message.id] ??= uuid())
           committed.add(id)
           if (message.role === 'user' && next.has(id) && messages.hasSubmission(this.context.sessionId, id)) continue
-          next.set(id, { ...message, id })
+          const saved = next.get(id)
+          next.set(id, {
+            ...message,
+            id,
+            parts: message.parts.length
+              ? message.parts.map((part, index) =>
+                  Object.assign({}, saved?.parts[index]?.type === part.type ? saved.parts[index] : undefined, part)
+                )
+              : (saved?.parts ?? [])
+          })
         }
       } finally {
         await recovered.close()
       }
     }
     for (const message of current.messages) {
+      if (this.removed.has(message.id)) continue
       if (this.committedLiveIds.has(message.id)) continue
       const id = this.nativeIds[message.id] ?? this.productIds.get(message.id) ?? uuid()
       this.productIds.set(message.id, id)
@@ -206,6 +231,12 @@ export class ChildThreadProjection {
       )
         continue
       next.set(id, { ...message, id })
+    }
+    const mappings = new Map([...Object.entries(this.nativeIds), ...this.productIds])
+    const retained = new Set([...mappings].filter(([source]) => !this.removed.has(source)).map(([, id]) => id))
+    for (const source of this.removed) {
+      const id = mappings.get(source)
+      if (id && !retained.has(id)) next.delete(id)
     }
     const order = [...next.keys()]
     const nativeOrder = [...committed]
@@ -219,7 +250,7 @@ export class ChildThreadProjection {
     }
     next = new Map(order.map((id) => [id, next.get(id)!]))
     const changed = [...next.values()].filter((message) => !isDeepStrictEqual(message, this.saved.get(message.id)))
-    if (changed.length || history) {
+    if (changed.length || history || next.size !== this.saved.size) {
       application.get('DbService').withWriteTx((tx) => {
         for (const message of changed) {
           const at = order.indexOf(message.id)
@@ -239,14 +270,20 @@ export class ChildThreadProjection {
           })
         }
         if (!isDeepStrictEqual(order, [...this.saved.keys()]))
-          messages.orderChildArchiveTx(tx, this.context.sessionId, order)
+          messages.orderChildArchiveTx(
+            tx,
+            this.context.sessionId,
+            order,
+            [...this.saved.keys()].filter((id) => !next.has(id))
+          )
         const durable = new Set(Object.values(this.nativeIds))
         const uncommitted = [...this.productIds.values()].some((id) => !durable.has(id))
         contexts.saveProjectionTx(
           tx,
           this.context.id,
           this.nativeIds,
-          this.archiveGap ?? current.gap ?? (uncommitted ? 'mapping-reset' : undefined)
+          this.archiveGap ?? current.gap ?? (uncommitted ? 'mapping-reset' : undefined),
+          [...this.removed]
         )
         for (const input of current.inputs) {
           if (input.inputId && messages.hasSubmission(this.context.sessionId, input.inputId))
@@ -267,6 +304,7 @@ export class ChildThreadProjection {
       messages: [...next.values()],
       active: current.activity.state === 'active',
       available: !this.stopped && !current.closed,
+      canSubmit: !this.stopped && !current.closed && !!this.handle.input,
       diagnostic: current.diagnostic?.message ?? this.archiveGap ?? current.gap
     })
   }
@@ -284,7 +322,7 @@ export class ChildThreadProjection {
     await this.observation?.stop()
     await this.flush()
     await this.projection.close()
-    this.publish({ ...this.view, available: false, active: false })
+    this.publish({ ...this.view, available: false, canSubmit: false, active: false })
     this.delivery.dispose()
   }
 

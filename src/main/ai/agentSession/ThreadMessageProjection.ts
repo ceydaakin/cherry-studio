@@ -48,6 +48,7 @@ export type ThreadProjectionUpdate =
       state: ProjectionState
     }
 type Source = { item: MessageItem | ToolCallItem; result?: ToolResultItem }
+export type MessageDecorator = (message: CherryUIMessage, source: Source) => CherryUIMessage
 
 /** Main-owned current view. Native execution, product IDs and archive writes belong to its caller. */
 export class ThreadMessageProjection {
@@ -66,7 +67,10 @@ export class ThreadMessageProjection {
   private closing?: Promise<void>
   private view: ThreadMessageView
 
-  constructor(readonly thread: Thread) {
+  constructor(
+    readonly thread: Thread,
+    private readonly decorate?: MessageDecorator
+  ) {
     this.view = { ...this.state, thread, revision: 0, messages: [] }
   }
 
@@ -240,7 +244,7 @@ export class ThreadMessageProjection {
       await this.closeReaders()
     }
     if (event.type === 'snapshot' || event.type === 'item.upsert' || event.type === 'item.remove') {
-      await this.project()
+      await this.project(event.type === 'item.upsert' ? event.item : undefined)
     }
     this.publish(before, state)
   }
@@ -284,7 +288,7 @@ export class ThreadMessageProjection {
     }
   }
 
-  private async project(): Promise<void> {
+  private async project(updated?: ContentItem): Promise<void> {
     const next = new Map<string, Source>()
     const results = new Map<string, ToolResultItem>()
     for (const item of this.items.values())
@@ -301,8 +305,14 @@ export class ThreadMessageProjection {
       }
     for (const [id, source] of next) {
       const previous = this.sources.get(id)
-      if (isDeepStrictEqual(previous, source)) continue
-      const message = await this.render(source, previous)
+      if (
+        isDeepStrictEqual(previous, source) &&
+        updated?.ref.id !== id &&
+        !(updated?.type === 'tool-result' && updated.call?.id === id)
+      )
+        continue
+      const normalized = await this.render(source, previous)
+      const message = this.decorate?.(normalized, source) ?? normalized
       this.sources.set(id, source)
       if (!isDeepStrictEqual(message, this.messages.get(id))) this.messages.set(id, message)
     }

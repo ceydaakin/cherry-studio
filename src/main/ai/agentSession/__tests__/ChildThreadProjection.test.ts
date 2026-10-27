@@ -71,6 +71,7 @@ function fixture(beforeRead?: () => Promise<void>) {
     completeness
   })
   return {
+    handle,
     context,
     archive,
     projection,
@@ -81,6 +82,40 @@ function fixture(beforeRead?: () => Promise<void>) {
     }
   }
 }
+
+// Native retraction must survive a stale archive replay; old rows remain retained off the active path.
+it('persists explicit removals and does not resurrect them after reopening', async () => {
+  const f = fixture()
+  await f.projection.attach()
+  f.archive.items = [f.item('native-1', 'withdrawn'), f.item('native-2', 'retained')]
+  f.archive.aliases = { 'native-1': 'native-1', 'native-2': 'native-2' }
+  for (const item of f.archive.items) await f.send({ type: 'item.upsert', item })
+  await f.projection.flush()
+  const retained = f.projection.snapshot().messages[1].id
+  await f.send({ type: 'item.remove', ref: f.item('native-1', '').ref })
+  await f.projection.flush()
+  expect(savedChildView(f.context).messages.map((message) => message.id)).toEqual([retained])
+  await f.projection.stop()
+  projections.splice(projections.indexOf(f.projection), 1)
+  const reopened = new ChildThreadProjection(contexts.context(f.context.id), f.handle, () => f.archive)
+  projections.push(reopened)
+  await reopened.attach()
+  expect(reopened.snapshot().messages).toMatchObject([{ id: retained, parts: [{ text: 'retained' }] }])
+})
+
+// A committed UUID replaces its streaming identity without creating a second product row.
+it('keeps the product identity when a native committed block replaces a preview', async () => {
+  const f = fixture()
+  await f.projection.attach()
+  await f.send({ type: 'item.upsert', item: f.item('preview', 'part', 'partial') })
+  await f.projection.flush()
+  const id = f.projection.snapshot().messages[0].id
+  f.archive.items = [f.item('canonical', 'complete')]
+  f.archive.aliases = { canonical: 'canonical' }
+  await f.send({ type: 'item.upsert', item: f.archive.items[0], replaces: [f.item('preview', '').ref] })
+  await f.projection.flush()
+  expect(savedChildView(f.context).messages).toMatchObject([{ id, parts: [{ text: 'complete' }] }])
+})
 
 // Catches asynchronous native archives losing a completion that arrives while the previous read is in flight.
 it('serializes asynchronous archives with live completion and retains the preview identity', async () => {
@@ -169,7 +204,9 @@ it('archives public observations and restores source order from committed eviden
   expect(savedChildView(f.context).messages.map((message) => message.id)).toEqual(expected.map((message) => message.id))
   await f.projection.flush()
   expect(f.projection.snapshot().messages).toEqual(expected)
-  expect(() => messages.orderChildArchiveTx(dbh.db, f.context.sessionId, [id])).toThrow('retain every message')
+  expect(() => messages.orderChildArchiveTx(dbh.db, f.context.sessionId, [id])).toThrow(
+    'retain messages without explicit removal'
+  )
 })
 
 // Catches committed tool calls remaining stuck in input-available until the entire child finishes.

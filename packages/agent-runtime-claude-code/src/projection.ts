@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import type {
   SDKAssistantMessage,
   SDKPartialAssistantMessage,
+  SDKResultMessage,
   SessionMessage,
   SessionStoreEntry
 } from '@anthropic-ai/claude-agent-sdk'
@@ -138,6 +139,20 @@ export class ClaudeProjection {
     this.sources.set(message.uuid, sources)
     if (options.live) this.liveSources.add(message.uuid)
     return events
+  }
+
+  result(message: SDKResultMessage): ObservationPayload[] {
+    if (message.subtype !== 'success' || message.structured_output === undefined) return []
+    return this.message({
+      type: 'assistant',
+      uuid: message.uuid,
+      session_id: message.session_id,
+      parent_tool_use_id: null,
+      parent_agent_id: null,
+      message: {
+        content: [{ type: 'text', text: JSON.stringify(message.structured_output) }]
+      }
+    })
   }
 
   partial(message: SDKPartialAssistantMessage): ObservationPayload[] {

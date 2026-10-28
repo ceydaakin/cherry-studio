@@ -249,3 +249,26 @@ it('isolates a throwing observer and leaves uncorrelated commands and ambiguous 
     await test.close()
   }
 })
+
+// Structured output is native content too; the desktop must not need a second result-to-text path.
+it('projects structured result content before the terminal activity event', async () => {
+  const test = await wireFixture()
+  try {
+    test.send({
+      type: 'result',
+      subtype: 'success',
+      uuid: randomUUID(),
+      session_id: test.sessionId,
+      structured_output: { answer: ['one', 'two'] },
+      result: 'duplicate prose',
+      is_error: false,
+      usage: { input_tokens: 1, output_tokens: 1 },
+      modelUsage: {},
+      permission_denials: []
+    } as unknown as SDKMessage)
+    await expect.poll(() => textOf(test.view.snapshot)).toEqual([JSON.stringify({ answer: ['one', 'two'] })])
+    expect(test.view.snapshot.activity.state).toBe('idle')
+  } finally {
+    await test.close()
+  }
+})

@@ -425,6 +425,7 @@ export class ClaudeOwner {
     } else if (message.type === 'system' && message.subtype === 'compact_boundary') {
       events.push({ type: 'gap', reason: 'mapping-reset' })
     } else if (message.type === 'result') {
+      events.push(...projection.result(message))
       events.push({ type: 'activity.changed', activity: { scope: 'foreground', state: 'idle' } })
     }
     if (message.type !== 'result') projection.publish(events, { source: 'live', message })

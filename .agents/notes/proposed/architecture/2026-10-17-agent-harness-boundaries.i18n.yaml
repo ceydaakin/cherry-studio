@@ -1,5 +1,5 @@
 # Bilingual-pair consistency record (docs/i18n/README.md).
 # After editing either side, update its counterpart and re-record with:
 #   pnpm docs:check-pairing --write .agents/notes/proposed/architecture/2026-10-17-agent-harness-boundaries.md
-2026-10-17-agent-harness-boundaries.md: 2567a5139437ed2e75299bb778a02cba2545ebb6
-2026-10-17-agent-harness-boundaries.zh.md: cd3f8c26b28402a6e04c64f44f3efff5e340d520
+2026-10-17-agent-harness-boundaries.md: b2dd2d2587321d959214d070336cf49efea17b82
+2026-10-17-agent-harness-boundaries.zh.md: f7b0372836746c0517a29bf91e3e5e219b990d1d

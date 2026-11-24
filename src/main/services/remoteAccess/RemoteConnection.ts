@@ -35,6 +35,7 @@ export class RemoteConnection {
   private exported?: { exportId: string; bytes: Buffer; expiresAt: number }
   private writes: Promise<void> = Promise.resolve()
   private readonly subscriptions: AgentSubscriptions
+  private readonly releaseAttachmentSelections: () => void
 
   constructor(
     readonly channel: SecureChannel,
@@ -46,7 +47,7 @@ export class RemoteConnection {
   ) {
     this.subscriptions = new AgentSubscriptions(hub, (notification) => this.send(notification))
     // The reply is queued on the write chain in a microtask; setImmediate runs after it, keeping events behind the response.
-    registerAgentMethods(
+    this.releaseAttachmentSelections = registerAgentMethods(
       this.rpc,
       {
         requireAgent: () => ({ ...this.requireCapability('agent'), peerIdentity: this.channel.remoteIdentity }),
@@ -246,6 +247,7 @@ export class RemoteConnection {
   }
   dispose(): void {
     this.subscriptions.dispose()
+    this.releaseAttachmentSelections()
     this.exported = undefined
     this.authentication = undefined
   }

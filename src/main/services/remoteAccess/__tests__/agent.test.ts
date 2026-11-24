@@ -792,6 +792,22 @@ describe('remote agent access', () => {
     ).toMatchObject({ status: 'applied' })
   })
 
+  it('clears an attachment selection the phone abandoned when its connection ends', async () => {
+    const presence = new AttachmentPresenceService()
+    for (const name of ['present', 'release'] as const)
+      Object.assign(application.get('AttachmentPresenceService'), { [name]: presence[name].bind(presence) })
+    const uploadId = randomUUID()
+    await call('agent.attachments.present', {
+      selectionId: randomUUID(),
+      sessionId,
+      sequence: '1',
+      items: [{ attachmentId: uploadId, uploadId, filename: 'photo.png', mediaType: 'image/png', byteLength: 4 }]
+    })
+    expect(presence.owners()).toHaveLength(1)
+    connection.dispose()
+    expect(presence.owners()).toEqual([])
+  })
+
   it('does not allocate journals for metadata changes to unwatched sessions', () => {
     agentSessionService.update(sessionId, { name: 'Renamed before subscribing' })
     expect(hub.journal(sessionId).cursor.seq).toBe('0')

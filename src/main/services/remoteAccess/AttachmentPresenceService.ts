@@ -11,6 +11,7 @@ type Selection = {
   owner: FileIntakeOwner
   auth: UploadOwner
   expiresAt: number
+  generation: number
   commandId?: string
 }
 
@@ -82,6 +83,7 @@ export class AttachmentPresenceService extends BaseService {
       owner,
       auth,
       expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+      generation,
       commandId: previous?.commandId
     })
     this.markChanged(input.sessionId)
@@ -98,6 +100,14 @@ export class AttachmentPresenceService extends BaseService {
   }
   owners(): string[] {
     return [...new Set([...this.rows.values()].map((row) => row.owner.ownerId))]
+  }
+  /** Drops selections last presented on a connection that has ended, so an abandoned upload never stays "ready". */
+  release(generation: number): void {
+    for (const [key, row] of this.rows)
+      if (row.generation === generation) {
+        this.rows.delete(key)
+        this.markChanged(row.input.sessionId)
+      }
   }
   cancelOwner(owner: FileIntakeOwner): void {
     for (const [key, row] of this.rows)

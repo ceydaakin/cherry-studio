@@ -5,6 +5,7 @@ export const mockAttachmentPresenceService = {
   present: vi.fn().mockReturnValue({ accepted: true }),
   submitting: vi.fn(),
   owners: vi.fn().mockReturnValue([]),
+  release: vi.fn(),
   cancelOwner: vi.fn(),
   list: vi.fn().mockResolvedValue([])
 }

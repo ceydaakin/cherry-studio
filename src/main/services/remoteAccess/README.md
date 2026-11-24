@@ -146,7 +146,8 @@ ignores responses superseded by later pairing events or a stopped LAN listener.
 ## Attachment ownership
 
 The file module owns checkpoint-based recovery and retention. Selection is disposable presentation; new sends carry
-explicit upload references. Intake/draft tables and their unpublished development migrations were removed.
+explicit upload references. A selection is dropped when the connection that last presented it ends; a reconnecting
+phone re-presents it on the new connection. Intake/draft tables and their unpublished development migrations were removed.
 
 `FileIntakeService` owns durable staging under `feature.files.intakes`; `RemoteUploads`
 binds its operations to the current device grant.

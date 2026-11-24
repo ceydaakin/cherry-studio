@@ -62,6 +62,28 @@ describe('disposable attachment presentation', () => {
     expect(service.present(owner, auth, second, input).accepted).toBe(false)
     expect((await service.list('session'))[0].items).toEqual([])
   })
+  it('clears selections presented by a connection when that connection ends', async () => {
+    const service = new AttachmentPresenceService()
+    const other = { ownerId: 'tablet/grant', quotaKey: 'tablet' }
+    const first = service.connection()
+    const second = service.connection()
+    service.present(owner, auth, first, input)
+    service.present(other, auth, second, { ...input, selectionId: 'tablet-selection' })
+    service.release(first)
+    expect((await service.list('session')).map((row) => row.selectionId)).toEqual(['tablet-selection'])
+    expect(service.owners()).toEqual([other.ownerId])
+  })
+  it('keeps a selection the phone re-presented on a newer connection when the old one ends', async () => {
+    const service = new AttachmentPresenceService()
+    const first = service.connection()
+    service.present(owner, auth, first, input)
+    const second = service.connection()
+    service.present(owner, auth, second, input)
+    service.release(first)
+    expect((await service.list('session')).map((row) => row.selectionId)).toEqual(['selection'])
+    service.release(second)
+    expect(await service.list('session')).toEqual([])
+  })
   it('rebuilds presentation after restart and takes progress from the file owner', async () => {
     let service = new AttachmentPresenceService()
     service.present(owner, auth, service.connection(), input)
